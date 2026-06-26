@@ -1,0 +1,221 @@
+//@version=5
+// NVDA RSI Divergence Strategy
+// Detects regular and hidden RSI divergences against price pivots,
+// confirms entry with RSI threshold crossovers, trend EMA, and volume.
+// Recommended: NVDA Daily or 4H chart. Backtest window: last 90 days.
+strategy("NVDA RSI Divergence Strategy",
+     shorttitle        = "NVDA RSI-DIV",
+     overlay           = true,
+     initial_capital   = 100000,
+     default_qty_type  = strategy.percent_of_equity,
+     default_qty_value = 10,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0.05,
+     slippage          = 2)
+
+// ════════════════════════════════════════════════════════════════
+//  INPUTS
+// ════════════════════════════════════════════════════════════════
+// --- RSI ---
+rsiLen = input.int(14,  "RSI Length",   group="RSI", minval=2,  maxval=30)
+rsiOB  = input.int(65,  "Overbought",   group="RSI", minval=55, maxval=85)
+rsiOS  = input.int(35,  "Oversold",     group="RSI", minval=15, maxval=45)
+
+// --- Pivot Detection ---
+lbL = input.int(5, "Left Bars",         group="Pivots", minval=2, maxval=20)
+lbR = input.int(5, "Right Bars",        group="Pivots", minval=2, maxval=20)
+
+// --- Filters ---
+emaLen    = input.int(50,    "Trend EMA Length",         group="Filters")
+maxAge    = input.int(25,    "Signal Timeout (bars)",     group="Filters", minval=5, maxval=60)
+useVol    = input.bool(true, "Require Above-Avg Volume",  group="Filters")
+minDivPct = input.float(0.3, "Min Price Divergence %",    group="Filters", step=0.1, minval=0.0)
+
+// --- Risk Management ---
+atrLen = input.int(14,    "ATR Length",        group="Risk")
+slMult = input.float(1.5, "Stop Loss × ATR",   group="Risk", step=0.1, minval=0.5)
+tpMult = input.float(3.5, "Take Profit × ATR", group="Risk", step=0.1, minval=1.0)
+
+// --- Backtest Window (90 days ending today 2026-06-26) ---
+startDate = input.time(timestamp("2026-03-28 00:00 +0000"), "Start Date", group="Backtest")
+endDate   = input.time(timestamp("2026-06-26 23:59 +0000"), "End Date",   group="Backtest")
+
+// ════════════════════════════════════════════════════════════════
+//  INDICATORS
+// ════════════════════════════════════════════════════════════════
+rsi   = ta.rsi(close, rsiLen)
+ema   = ta.ema(close, emaLen)
+atr   = ta.atr(atrLen)
+volMA = ta.sma(volume, 20)
+
+inWindow = time >= startDate and time <= endDate
+
+// ════════════════════════════════════════════════════════════════
+//  PIVOT DETECTION
+//  ta.pivothigh/low confirms bar[lbR] as a pivot when called at current bar.
+//  ph  = high[lbR] at the pivot bar; rsi[lbR] is RSI at that same bar.
+// ════════════════════════════════════════════════════════════════
+ph = ta.pivothigh(high, lbL, lbR)
+pl = ta.pivotlow(low,   lbL, lbR)
+
+var float pH1 = na, var float rH1 = na   // most recent high pivot
+var float pH2 = na, var float rH2 = na   // previous high pivot
+var float pL1 = na, var float rL1 = na   // most recent low pivot
+var float pL2 = na, var float rL2 = na   // previous low pivot
+
+if not na(ph)
+    pH2 := pH1;  rH2 := rH1
+    pH1 := ph;   rH1 := rsi[lbR]
+
+if not na(pl)
+    pL2 := pL1;  rL2 := rL1
+    pL1 := pl;   rL1 := rsi[lbR]
+
+// ════════════════════════════════════════════════════════════════
+//  DIVERGENCE DETECTION
+// ════════════════════════════════════════════════════════════════
+hasPivotLows  = not na(pL1) and not na(pL2) and not na(rL1) and not na(rL2)
+hasPivotHighs = not na(pH1) and not na(pH2) and not na(rH1) and not na(rH2)
+
+// Regular Bullish: price LL + RSI HL  (reversal signal from downtrend)
+bullRegular = hasPivotLows and
+              pL1 < pL2 and                          // price: lower low
+              rL1 > rL2 and                          // RSI:   higher low → divergence
+              rL1 < (rsiOS + 15) and                 // RSI near/in oversold at pivot
+              (pL2 - pL1) / pL2 * 100 >= minDivPct  // meaningful price gap
+
+// Regular Bearish: price HH + RSI LH  (reversal signal from uptrend)
+bearRegular = hasPivotHighs and
+              pH1 > pH2 and
+              rH1 < rH2 and
+              rH1 > (rsiOB - 15) and
+              (pH1 - pH2) / pH2 * 100 >= minDivPct
+
+// Hidden Bullish: price HL + RSI LL  (trend-continuation in uptrend)
+bullHidden = hasPivotLows and
+             pL1 > pL2 and                           // price: higher low
+             rL1 < rL2 and                           // RSI:   lower low
+             close > ema                             // confirm uptrend
+
+// Hidden Bearish: price LH + RSI HH  (trend-continuation in downtrend)
+bearHidden = hasPivotHighs and
+             pH1 < pH2 and
+             rH1 > rH2 and
+             close < ema
+
+bullDivDetect = bullRegular or bullHidden
+bearDivDetect = bearRegular or bearHidden
+
+// ════════════════════════════════════════════════════════════════
+//  SIGNAL STATE MACHINE  (divergence → pending → confirmed entry)
+// ════════════════════════════════════════════════════════════════
+var bool bullPending = false
+var bool bearPending = false
+var int  bullTimer   = 0
+var int  bearTimer   = 0
+
+if bullDivDetect
+    bullPending := true
+    bullTimer   := 0
+
+if bearDivDetect
+    bearPending := true
+    bearTimer   := 0
+
+if bullPending
+    bullTimer += 1
+    if bullTimer > maxAge
+        bullPending := false
+        bullTimer   := 0
+
+if bearPending
+    bearTimer += 1
+    if bearTimer > maxAge
+        bearPending := false
+        bearTimer   := 0
+
+// ════════════════════════════════════════════════════════════════
+//  ENTRY CONFIRMATION
+// ════════════════════════════════════════════════════════════════
+// Momentum confirmation: RSI exits extreme zone after divergence
+rsiXUp   = ta.crossover(rsi,  rsiOS)   // RSI crosses above oversold  → bullish flip
+rsiXDown = ta.crossunder(rsi, rsiOB)   // RSI crosses below overbought → bearish flip
+
+aboveEMA = close > ema
+belowEMA = close < ema
+volOk    = not useVol or (volume > volMA)
+noPos    = strategy.position_size == 0
+
+longEntry  = bullPending and rsiXUp   and aboveEMA and volOk and inWindow and noPos
+shortEntry = bearPending and rsiXDown and belowEMA and volOk and inWindow and noPos
+
+// Disarm pending state once entry fires
+if longEntry
+    bullPending := false
+if shortEntry
+    bearPending := false
+
+// ════════════════════════════════════════════════════════════════
+//  TRADE EXECUTION
+// ════════════════════════════════════════════════════════════════
+if longEntry
+    slPrice = close - atr * slMult
+    tpPrice = close + atr * tpMult
+    strategy.entry("Long", strategy.long)
+    strategy.exit("LX", "Long", stop=slPrice, limit=tpPrice)
+
+if shortEntry
+    slPrice = close + atr * slMult
+    tpPrice = close - atr * tpMult
+    strategy.entry("Short", strategy.short)
+    strategy.exit("SX", "Short", stop=slPrice, limit=tpPrice)
+
+// ════════════════════════════════════════════════════════════════
+//  VISUALS
+// ════════════════════════════════════════════════════════════════
+plot(ema, "EMA " + str.tostring(emaLen), color.new(color.orange, 0), linewidth=2)
+
+plotshape(longEntry,  "BUY",  shape.triangleup,
+     location.belowbar, color.lime, size=size.normal, text="BUY")
+plotshape(shortEntry, "SELL", shape.triangledown,
+     location.abovebar, color.red,  size=size.normal, text="SELL")
+
+bgcolor(longEntry  ? color.new(color.green, 85) : na, title="Long  BG")
+bgcolor(shortEntry ? color.new(color.red,   85) : na, title="Short BG")
+
+// ─── Info Dashboard ─────────────────────────────────────────────
+var table dash = table.new(position.top_right, 2, 7,
+     bgcolor      = color.new(color.black, 75),
+     border_color = color.new(color.gray, 40),
+     border_width = 1,
+     frame_color  = color.gray,
+     frame_width  = 1)
+
+if barstate.islast
+    ct  = strategy.closedtrades
+    win = strategy.wintrades
+    pct = ct > 0 ? win / ct * 100 : 0.0
+    rr  = tpMult / slMult
+
+    wc = pct >= 75 ? color.lime : pct >= 60 ? color.yellow : color.red
+    pc = strategy.netprofit >= 0 ? color.lime : color.red
+
+    table.cell(dash, 0, 0, "NVDA RSI DIV",           text_color=color.white,  bgcolor=color.new(color.navy, 30))
+    table.cell(dash, 1, 0, "90-Day Backtest",         text_color=color.white,  bgcolor=color.new(color.navy, 30))
+    table.cell(dash, 0, 1, "Closed Trades",           text_color=color.silver)
+    table.cell(dash, 1, 1, str.tostring(ct),          text_color=color.white)
+    table.cell(dash, 0, 2, "Wins",                    text_color=color.silver)
+    table.cell(dash, 1, 2, str.tostring(win),         text_color=color.lime)
+    table.cell(dash, 0, 3, "Win Rate",                text_color=color.silver)
+    table.cell(dash, 1, 3, str.tostring(pct, "#.1") + "%",          text_color=wc)
+    table.cell(dash, 0, 4, "Net P&L ($)",             text_color=color.silver)
+    table.cell(dash, 1, 4, "$" + str.tostring(strategy.netprofit, "#,###"), text_color=pc)
+    table.cell(dash, 0, 5, "Risk:Reward",             text_color=color.silver)
+    table.cell(dash, 1, 5, "1 : " + str.tostring(rr, "#.##"),      text_color=color.white)
+    table.cell(dash, 0, 6, "RSI Now",                 text_color=color.silver)
+    table.cell(dash, 1, 6, str.tostring(rsi, "#.1"),
+         text_color = rsi > rsiOB ? color.red : rsi < rsiOS ? color.lime : color.white)
+
+// ─── Alerts ─────────────────────────────────────────────────────
+alertcondition(longEntry,  "NVDA Long  – RSI Div", "NVDA: Bullish RSI divergence confirmed — LONG entry")
+alertcondition(shortEntry, "NVDA Short – RSI Div", "NVDA: Bearish RSI divergence confirmed — SHORT entry")
