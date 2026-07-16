@@ -1,0 +1,5 @@
+# generated / downloaded market data and backtest artifacts
+data/
+*.png
+__pycache__/
+*.pyc
