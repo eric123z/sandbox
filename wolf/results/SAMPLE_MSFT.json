@@ -1,0 +1,96 @@
+{
+  "ticker": "SAMPLE_MSFT",
+  "bars": 756,
+  "date_range": [
+    "2023-07-17",
+    "2026-06-08"
+  ],
+  "last_close": 602.08,
+  "buy_hold_points": 269.74,
+  "combos_tested": 247,
+  "best": {
+    "trades": 25,
+    "win_pct": 52.0,
+    "impact_factor": 2.77,
+    "max_dd_points": 78.82,
+    "total_points": 306.11,
+    "points_per_trade": 12.24,
+    "strategy": "MACD",
+    "params": {
+      "fast": 12,
+      "slow": 26,
+      "signal": 9
+    }
+  },
+  "top": [
+    {
+      "trades": 25,
+      "win_pct": 52.0,
+      "impact_factor": 2.77,
+      "max_dd_points": 78.82,
+      "total_points": 306.11,
+      "points_per_trade": 12.24,
+      "strategy": "MACD",
+      "params": {
+        "fast": 12,
+        "slow": 26,
+        "signal": 9
+      }
+    },
+    {
+      "trades": 26,
+      "win_pct": 50.0,
+      "impact_factor": 2.34,
+      "max_dd_points": 117.04,
+      "total_points": 273.35,
+      "points_per_trade": 10.51,
+      "strategy": "MACD",
+      "params": {
+        "fast": 12,
+        "slow": 35,
+        "signal": 9
+      }
+    },
+    {
+      "trades": 30,
+      "win_pct": 43.3,
+      "impact_factor": 2.36,
+      "max_dd_points": 78.97,
+      "total_points": 255.51,
+      "points_per_trade": 8.52,
+      "strategy": "MACD",
+      "params": {
+        "fast": 12,
+        "slow": 21,
+        "signal": 9
+      }
+    },
+    {
+      "trades": 31,
+      "win_pct": 48.4,
+      "impact_factor": 2.08,
+      "max_dd_points": 96.51,
+      "total_points": 241.65,
+      "points_per_trade": 7.8,
+      "strategy": "MACD",
+      "params": {
+        "fast": 8,
+        "slow": 35,
+        "signal": 9
+      }
+    },
+    {
+      "trades": 8,
+      "win_pct": 25.0,
+      "impact_factor": 3.53,
+      "max_dd_points": 136.04,
+      "total_points": 237.71,
+      "points_per_trade": 29.71,
+      "strategy": "EMA cross",
+      "params": {
+        "fast": 5,
+        "slow": 150
+      }
+    }
+  ]
+}
