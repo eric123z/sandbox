@@ -1,32 +1,33 @@
 #!/usr/bin/env python3
 """
-TheCondor — an automated XSP iron condor trader for Alpaca.
+TheCondor — an automated SPY iron condor trader for Alpaca.
 
-Sells a delta-targeted iron condor on XSP (Mini-SPX, cash-settled,
-European-style index options) as a single atomic multi-leg (MLEG) order:
+Sells a delta-targeted iron condor on the SPY ETF as a single atomic
+multi-leg (MLEG) order:
 
     sell 1 OTM put   (short put,  ~target delta)
     buy  1 further OTM put   (put wing,  short strike - width)
     sell 1 OTM call  (short call, ~target delta)
     buy  1 further OTM call  (call wing, short strike + width)
 
-Because XSP is European-style and cash-settled there is no early assignment
-and no share delivery at expiration — the default plan is to hold the condor
-to expiration and let it settle in cash. An optional `manage` command closes
-early once a take-profit fraction of the credit has decayed away.
+SPY options are American-style and physically settled: a short leg that
+finishes in the money is assigned 100 shares per contract, and early
+assignment is possible (mainly deep-ITM calls before an ex-dividend date).
+Because of that, `manage` closes the condor on expiration day (or
+`--close-dte` days before) instead of holding through settlement, and can
+also take profit early once a fraction of the credit has decayed away.
 
 Commands:
     trade    Build and submit a new condor (skips if one is already open).
-    manage   Close the open condor if the take-profit target is reached.
-    status   Show open XSP option positions, open orders, and saved state.
+    manage   Take profit if the target is hit; always close by expiration.
+    status   Show open SPY option positions, open orders, and saved state.
     close    Buy back the open condor now at the current mid price.
 
 Credentials are read from the environment:
     APCA_API_KEY_ID / APCA_API_SECRET_KEY  (or ALPACA_API_KEY / ALPACA_SECRET_KEY)
 
-Alpaca currently offers index options (XSP, SPX, VIX, ...) in PAPER trading;
-this script defaults to the paper endpoint. Pass --live only once Alpaca
-enables index options for live accounts and you have options level 3.
+The script defaults to Alpaca's paper endpoint; pass --live to trade a live
+account (requires options trading level 3 for spreads).
 
 This is example code, not investment advice. Iron condors have limited
 profit and can lose the full spread width minus the credit received.
@@ -47,11 +48,11 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderClass, OrderSide, PositionIntent, QueryOrderStatus, TimeInForce
 from alpaca.trading.requests import GetOrdersRequest, LimitOrderRequest, OptionLegRequest
 
-UNDERLYING = "XSP"
+UNDERLYING = "SPY"
 STATE_FILE = "thecondor_state.json"
-# Cboe minimum increments for XSP: 0.05 below $3.00 premium, 0.10 at or above.
+# SPY is in the penny interval program: options quote in $0.01 increments.
 def tick_for(price: float) -> float:
-    return 0.05 if price < 3.0 else 0.10
+    return 0.01
 
 OCC_RE = re.compile(r"^([A-Z]{1,6})(\d{6})([CP])(\d{8})$")
 
@@ -104,7 +105,7 @@ def save_state(state: dict | None) -> None:
 
 
 def open_condor_symbols(trading: TradingClient) -> list:
-    """Open XSP option positions, as (symbol, signed_qty) pairs."""
+    """Open SPY option positions, as (symbol, signed_qty) pairs."""
     out = []
     for pos in trading.get_all_positions():
         parsed = parse_occ(pos.symbol)
@@ -136,7 +137,7 @@ def fetch_chain(data: OptionHistoricalDataClient, min_dte: int, max_dte: int) ->
         contracts.append(Contract(symbol, parsed[2], parsed[3], parsed[1], bid, ask, delta))
     if not contracts:
         sys.exit(f"No quotable {UNDERLYING} contracts found {min_dte}-{max_dte} DTE. "
-                 "Check your data subscription/feed and that index options are enabled.")
+                 "Check your options data subscription/feed.")
     return contracts
 
 
@@ -183,7 +184,7 @@ def ceil_to_tick(price: float) -> float:
 def cmd_trade(args, trading: TradingClient, data: OptionHistoricalDataClient) -> None:
     existing = open_condor_symbols(trading)
     if existing:
-        print("An XSP options position is already open — not stacking another condor:")
+        print(f"A {UNDERLYING} options position is already open — not stacking another condor:")
         for sym, qty in existing:
             print(f"  {sym:>21}  qty {qty:+g}")
         return
@@ -253,8 +254,9 @@ def cmd_trade(args, trading: TradingClient, data: OptionHistoricalDataClient) ->
         "legs": {"long_put": long_put.symbol, "short_put": short_put.symbol,
                  "short_call": short_call.symbol, "long_call": long_call.symbol},
     })
-    print(f"State saved to {STATE_FILE}. XSP settles in cash at expiration — "
-          "no assignment is possible; run `manage` to take profit early.")
+    print(f"State saved to {STATE_FILE}. SPY options are physically settled — "
+          "run `manage` daily; it takes profit at the target and always closes "
+          "by expiration to avoid assignment.")
 
 
 def current_close_cost(data: OptionHistoricalDataClient, positions: list) -> float:
@@ -295,16 +297,21 @@ def cmd_manage(args, trading: TradingClient, data: OptionHistoricalDataClient) -
     state = load_state()
     positions = open_condor_symbols(trading)
     if not positions:
-        print("No open XSP option positions.")
-        if state:
-            exp = date.fromisoformat(state["expiration"])
-            if exp <= date.today():
-                print(f"Condor expired {exp} and settled in cash — clearing state.")
-            save_state(None)
+        print(f"No open {UNDERLYING} option positions.")
+        save_state(None)
+        return
+    # Expiration comes from the position symbols, so the safety close works
+    # even if the state file has been lost.
+    expiration = min(parse_occ(sym)[1] for sym, _ in positions)
+    dte = (expiration - date.today()).days
+    if dte <= args.close_dte:
+        print(f"Condor expires {expiration} ({dte} DTE) — closing to avoid assignment.")
+        close_positions(args, trading, data, positions)
+        save_state(None)
         return
     if not state:
-        sys.exit(f"Positions are open but {STATE_FILE} is missing — "
-                 "use `close` to exit manually.")
+        sys.exit(f"Positions are open but {STATE_FILE} is missing — take-profit "
+                 "needs the credit received; use `close` to exit manually.")
     cost = current_close_cost(data, positions)
     target = state["credit"] * (1 - args.take_profit)
     print(f"Credit received {state['credit']:.2f}, cost to close now {cost:.2f}, "
@@ -313,13 +320,14 @@ def cmd_manage(args, trading: TradingClient, data: OptionHistoricalDataClient) -
         close_positions(args, trading, data, positions)
         save_state(None)
     else:
-        print("Target not reached — holding (XSP settles in cash at expiration).")
+        print(f"Target not reached — holding ({dte} DTE; forced close at "
+              f"{args.close_dte} DTE).")
 
 
 def cmd_close(args, trading: TradingClient, data: OptionHistoricalDataClient) -> None:
     positions = open_condor_symbols(trading)
     if not positions:
-        print("No open XSP option positions to close.")
+        print(f"No open {UNDERLYING} option positions to close.")
         save_state(None)
         return
     close_positions(args, trading, data, positions)
@@ -328,17 +336,18 @@ def cmd_close(args, trading: TradingClient, data: OptionHistoricalDataClient) ->
 
 def cmd_status(args, trading: TradingClient, data: OptionHistoricalDataClient) -> None:
     positions = open_condor_symbols(trading)
-    print("Open XSP option positions:" if positions else "No open XSP option positions.")
+    print(f"Open {UNDERLYING} option positions:" if positions
+          else f"No open {UNDERLYING} option positions.")
     for sym, qty in positions:
         print(f"  {sym:>21}  qty {qty:+g}")
     orders = trading.get_orders(GetOrdersRequest(status=QueryOrderStatus.OPEN))
-    xsp_orders = [o for o in orders
-                  if any(parse_occ(leg.symbol) and parse_occ(leg.symbol)[0] == UNDERLYING
-                         for leg in (o.legs or []))
-                  or (parse_occ(o.symbol or "") or ("",))[0] == UNDERLYING]
-    if xsp_orders:
-        print("Open XSP orders:")
-        for o in xsp_orders:
+    open_orders = [o for o in orders
+                   if any(parse_occ(leg.symbol) and parse_occ(leg.symbol)[0] == UNDERLYING
+                          for leg in (o.legs or []))
+                   or (parse_occ(o.symbol or "") or ("",))[0] == UNDERLYING]
+    if open_orders:
+        print(f"Open {UNDERLYING} orders:")
+        for o in open_orders:
             print(f"  {o.id}  {o.order_class}  {o.status}  limit {o.limit_price}")
     state = load_state()
     if state:
@@ -348,10 +357,10 @@ def cmd_status(args, trading: TradingClient, data: OptionHistoricalDataClient) -
 
 def main() -> None:
     parser = argparse.ArgumentParser(prog="TheCondor",
-                                     description="Automated XSP iron condors on Alpaca.")
+                                     description="Automated SPY iron condors on Alpaca.")
     parser.add_argument("--live", action="store_true",
-                        help="use the live endpoint (default: paper; Alpaca index "
-                             "options are currently paper-only)")
+                        help="use the live endpoint (default: paper; live spreads "
+                             "require options trading level 3)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_trade = sub.add_parser("trade", help="open a new iron condor")
@@ -368,10 +377,15 @@ def main() -> None:
                          help="price concession off mid (default 0.05)")
     p_trade.add_argument("--dry-run", action="store_true", help="print the plan, don't submit")
 
-    p_manage = sub.add_parser("manage", help="take profit early if the target is hit")
+    p_manage = sub.add_parser("manage",
+                              help="take profit if the target is hit; always close "
+                                   "by expiration to avoid assignment")
     p_manage.add_argument("--take-profit", type=float, default=0.50,
                           help="close once this fraction of the credit has been "
                                "captured (default 0.50)")
+    p_manage.add_argument("--close-dte", type=int, default=0,
+                          help="force-close when this many days to expiration "
+                               "remain (default 0 = expiration day)")
     p_manage.add_argument("--slippage", type=float, default=0.05,
                           help="price concession past mid when closing (default 0.05)")
 
